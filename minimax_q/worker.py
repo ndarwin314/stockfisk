@@ -18,6 +18,7 @@ import nashpy
 from poke_env.player.env_player import EnvPlayer
 
 from .r2d2 import Network, AgentState
+from minimax_q.minimaxq import Minimax
 from .priority_tree import PriorityTree
 import minimax_q.config as config
 
@@ -515,15 +516,11 @@ class LocalBuffer:
 
 
 class Actor:
-    def __init__(self, model, env1: EnvPlayer, env2: EnvPlayer, epsilon: float, sample_queue):
+    def __init__(self, model, epsilon: float, sample_queue):
         # this is a sickeningly stupid solution but i think it will work
         self.hidden_dim = config.hidden_dim
         self.model = model
-        env1.set_opponent(env2)
-        env2.set_opponent(env1)
-        env1.set_policy(self.model)
-        env2.set_policy(self.model)
-        self.envs: (EnvPlayer, EnvPlayer) = (env1, env2)
+        self.env = Minimax(None, model)
         self.model.eval()
         self.local_buffer = LocalBuffer()
 

@@ -6,9 +6,9 @@ import nashpy
 from poke_env.player import Gen8EnvSinglePlayer, EnvPlayer
 from poke_env.environment import AbstractBattle, Battle
 
-from .r2d2 import Network, AgentState, Option
-from .r2d2 import reverse_move_lookup, reverse_dex_lookup, move_lookup, dex_lookup, chart, action_embed_size
-from .r2d2 import uk_move_idx, uk_mon_idx
+from minimax_q.r2d2 import Network, AgentState, Option
+from minimax_q.r2d2 import reverse_move_lookup, reverse_dex_lookup, move_lookup, dex_lookup, chart, action_embed_size
+from minimax_q.r2d2 import uk_move_idx, uk_mon_idx
 
 action_space = np.ones(action_embed_size)
 action_space[uk_move_idx] = 5
@@ -57,9 +57,11 @@ class Minimax(Gen8EnvSinglePlayer):
     action_space = MultiDiscrete(action_space)
     observation_space = Box(low, high)
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.policy: Network | None = None
+    def __init__(self, opponent, model, *args, **kwargs):
+        if opponent is None:
+            opponent = Minimax(self, model,*args, **kwargs)
+        super().__init__(opponent, *args, **kwargs)
+        self.policy: Network = model
         #self.history = []
         self.hidden = None
 

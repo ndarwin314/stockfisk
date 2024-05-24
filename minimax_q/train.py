@@ -25,7 +25,7 @@ def wrap_run(actor):
 
 
 def train(num_actors=config.num_actors, log_interval=config.log_interval):
-    env = Minimax()
+    env = Minimax(None, None)
 
     model = Network(env.action_space.n, env.observation_space.shape[0], config.hidden_dim)
     del env
@@ -36,10 +36,7 @@ def train(num_actors=config.num_actors, log_interval=config.log_interval):
 
     buffer = ReplayBuffer(sample_queue_list, batch_queue, priority_queue)
     learner = Learner(batch_queue, priority_queue, model)
-    actors = [Actor(model,
-                    Minimax(start_challenging=True),
-                    Minimax(start_challenging=False),
-                    get_epsilon(i), sample_queue_list[i]) for i in range(num_actors)]
+    actors = [Actor(model, get_epsilon(i), sample_queue_list[i]) for i in range(num_actors)]
 
     actor_procs = [mp.Process(target=wrap_run, args=(actor,)) for actor in actors]
     for proc in actor_procs:
