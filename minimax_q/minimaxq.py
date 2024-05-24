@@ -3,7 +3,7 @@ import torch
 from gymnasium.spaces import Space, Box, MultiDiscrete
 import nashpy
 
-from poke_env.player import Gen8EnvSinglePlayer, EnvPlayer
+from poke_env.player import Gen8EnvSinglePlayer, EnvPlayer, Player, BattleOrder
 from poke_env.environment import AbstractBattle, Battle
 
 from minimax_q.r2d2 import Network, AgentState, Option
@@ -53,14 +53,12 @@ low = np.array([-1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 high = np.array([3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1])
 
 
-class Minimax(Gen8EnvSinglePlayer):
+class MinimaxDummy(Player):
     action_space = MultiDiscrete(action_space)
     observation_space = Box(low, high)
 
-    def __init__(self, opponent, model, *args, **kwargs):
-        if opponent is None:
-            opponent = Minimax(self, model,*args, **kwargs)
-        super().__init__(opponent, *args, **kwargs)
+    def __init__(self, model, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.policy: Network = model
         #self.history = []
         self.hidden = None
@@ -153,4 +151,11 @@ class Minimax(Gen8EnvSinglePlayer):
         return self._observations.get(), self.get_additional_info()"""
 
 
+class Minimax(MinimaxDummy, EnvPlayer):
+    
+    def __init__(self, opponent, model, *args, **kwargs):
+        MinimaxDummy.__init__(self, model, *args, **kwargs)
+        EnvPlayer.__init__(self, opponent, *args, **kwargs)
 
+    def action_to_move(self, action: int, battle: AbstractBattle) -> BattleOrder:
+        return

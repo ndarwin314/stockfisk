@@ -4,7 +4,7 @@ import torch.multiprocessing as mp
 import torch
 import numpy as np
 from minimax_q.worker import Learner, Actor, ReplayBuffer
-from minimax_q.minimaxq import Minimax
+from minimax_q.minimaxq import Minimax, MinimaxDummy
 from minimax_q.r2d2 import Network
 import minimax_q.config as config
 
@@ -25,9 +25,9 @@ def wrap_run(actor):
 
 
 def train(num_actors=config.num_actors, log_interval=config.log_interval):
-    env = Minimax(None, None)
+    env = MinimaxDummy(None)
 
-    model = Network(env.action_space.n, env.observation_space.shape[0], config.hidden_dim)
+    model = Network(env.action_space.shape[0], env.observation_space.shape[0], config.hidden_dim)
     del env
     model.share_memory()
     sample_queue_list = [mp.Queue() for _ in range(num_actors)]

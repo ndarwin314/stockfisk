@@ -17,9 +17,9 @@ import numpy as np
 import nashpy
 from poke_env.player.env_player import EnvPlayer
 
-from .r2d2 import Network, AgentState
-from minimax_q.minimaxq import Minimax
-from .priority_tree import PriorityTree
+from minimax_q.r2d2 import Network, AgentState
+from minimax_q.minimaxq import Minimax, MinimaxDummy
+from minimax_q.priority_tree import PriorityTree
 import minimax_q.config as config
 
 
@@ -520,7 +520,8 @@ class Actor:
         # this is a sickeningly stupid solution but i think it will work
         self.hidden_dim = config.hidden_dim
         self.model = model
-        self.env = Minimax(None, model)
+        dummy = MinimaxDummy(model)
+        self.env = Minimax(dummy, model)
         self.model.eval()
         self.local_buffer = LocalBuffer()
 
