@@ -37,11 +37,11 @@ def embed_all_moves(idxs, unrevealed_mons: int, unrevealed_moves: int):
         embedding[reverse_dex_lookup["UNKNOWN"]] = unrevealed_mons
     if unrevealed_moves != 0:
         embedding[reverse_move_lookup["UNKNOWN"]] = unrevealed_moves
-    return embedding
+    return torch.tensor(embedding)
 
 
 def embed_idx(idx1, idx2, mon, move):
-    embedding = np.zeros(2 * action_embed_size)
+    embedding = np.zeros(2 * action_embed_size, dtype=np.float32)
     embedding[idx1] = 1
     if idx2 == uk_mon_idx:
         embedding[idx2 + action_embed_size] = mon
@@ -49,8 +49,7 @@ def embed_idx(idx1, idx2, mon, move):
         embedding[idx2 + action_embed_size] = move
     else:
         embedding[idx2 + action_embed_size] = 1
-    return embedding
-
+    return torch.tensor(embedding)
 
 
 @dataclass
@@ -66,8 +65,9 @@ class AgentState:
         temp1 = embed_all_moves(self.legal_moves_idx, 0, 0)
         temp2 = embed_all_moves(self.legal_moves_opponent_idx, self.unknown_pokemon, self.unknown_moves)
         self.recurrent_input = torch.concat([self.obs, temp1, temp2])
-        bad = [[embed_idx(idx1, idx2, self.unknown_pokemon, self.unknown_moves)for idx1 in self.legal_moves_idx] for idx2 in self.legal_moves_opponent_idx]
-        self.advantage_input = torch.tensor(bad)
+        bad = [embed_idx(idx1, idx2, self.unknown_pokemon, self.unknown_moves)
+               for idx1 in self.legal_moves_idx for idx2 in self.legal_moves_opponent_idx]
+        self.advantage_input = bad
 
     def update(self, obs, last_legal_idx, last_legal_oppponent_idx, hidden):
         self.obs = torch.from_numpy(obs).unsqueeze(0)
@@ -86,7 +86,7 @@ class Network(nn.Module):
 
         self.max_forward_steps = config.forward_steps
 
-        self.recurrent = nn.LSTM(obs_dim + 2 * action_dim + 1, self.hidden_dim, batch_first=True)
+        self.recurrent = nn.LSTM(obs_dim + 2 * action_dim, self.hidden_dim, batch_first=True)
 
         # instead of learning a mapping from hidden -> action x action,
         # we learn a map from hidden, action, action ->  1
@@ -108,13 +108,16 @@ class Network(nn.Module):
 
         recurrent_input = state.recurrent_input
 
-        _, recurrent_output = self.recurrent(recurrent_input, state.hidden_state)
+        _, recurrent_output = self.recurrent(recurrent_input.view(1, -1).float(), state.hidden_state)
 
-        hidden = recurrent_output[0]
+        hidden = recurrent_output[0].squeeze()
 
-        adv = self.advantage(torch.concat([state.hidden_state, state.advantage_input]))
+        adv = torch.zeros(len(state.advantage_input))
+        for i, inp, in enumerate(state.advantage_input):
+            test = self.advantage(torch.concat([hidden, inp]))
+            adv[i] = test
         val = self.value(hidden)
-        q_value = val + adv - adv.mean(1, keepdim=True)
+        q_value = val + adv.view(len(state.legal_moves_idx), len(state.legal_moves_opponent_idx)) - adv.mean()
 
         return q_value, recurrent_output
 

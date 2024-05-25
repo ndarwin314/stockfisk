@@ -18,7 +18,7 @@ import nashpy
 from poke_env.player.env_player import EnvPlayer
 
 from minimax_q.r2d2 import Network, AgentState
-from minimax_q.minimaxq import Minimax, MinimaxDummy
+from minimax_q.minimaxq import Minimax
 from minimax_q.priority_tree import PriorityTree
 import minimax_q.config as config
 
@@ -28,13 +28,13 @@ import minimax_q.config as config
 
 @dataclass
 class Block:
-    obs: np.array
+    obs: torch.tensor
     action: np.array
     opponent_action: np.array
     legal_actions: Any
     predicted_legal_actions: Any
     reward: np.array
-    hidden: np.array
+    hidden: list[tuple[torch.tensor, torch.tensor]]
     size: int
 
 
@@ -430,14 +430,14 @@ class Learner:
 # and figure out how to use both sides for training data
 @dataclass
 class Transition:
-    observation: np.ndarray
+    observation: torch.tensor
     action_self: int
     action_opponent: int
     options_self: list[int]
     options_opponent: list[int]
     reward: int
     q_estimate: float
-    hidden: np.ndarray
+    hidden: tuple[torch.tensor, torch.tensor]
 
 
 class LocalBuffer:
@@ -508,7 +508,7 @@ class LocalBuffer:
                 np.array([t.options_self for t in self.transitions[i]]),
                 np.array([t.options_opponent for t in self.transitions[i]]),
                 np.array([t.reward for t in self.transitions[i]]),
-                np.array([t.hidden for t in self.transitions[i]]),
+                [t.hidden for t in self.transitions[i]],
                 self.size,
             )
             blocks.append(block)
@@ -517,11 +517,9 @@ class LocalBuffer:
 
 class Actor:
     def __init__(self, model, epsilon: float, sample_queue):
-        # this is a sickeningly stupid solution but i think it will work
         self.hidden_dim = config.hidden_dim
         self.model = model
-        dummy = MinimaxDummy(model)
-        self.env = Minimax(dummy, model)
+        self.agents: (Minimax, Minimax) = (Minimax(model), Minimax(model))
         self.model.eval()
         self.local_buffer = LocalBuffer()
 
@@ -532,79 +530,48 @@ class Actor:
         self.block_length = config.block_length
 
     async def run(self):
-        actor_steps = 0
+        num_games = 0
         while True:
+            self.reset()
 
-            done = False
-            agent_state = await self.reset()
-            episode_steps = 0
+            await self.agents[0].battle_against(self.agents[1], 1)
 
-            while not done and episode_steps < self.max_episode_steps:
-                # don't need to do epsilon greedy exploration since we sample from nash
-                tasks = []
-                hiddens = []
-                actions = []
-                q_vals = []
-                for i in range(2):
-                    with torch.no_grad():
-                        q_matrix, hidden = self.model[i](agent_state[i])
-                    hiddens.append(hidden)
-                    game = nashpy.Game(q_matrix)
-                    pa, pb = game.support_enumeration(tol=1e-6)
-                    q_val = game[pa, pb][0]
-                    q_vals.append(q_val)
-                    actions.append(numpy.random.choice(agent_state[i].legal_moves_idx, pa))
-                    tasks.append(asyncio.create_task(self.envs[i].step(actions[i])))
-
-                # apply action in env
+            num_turns = len(self.agents[0].history)
+            for i in range(num_turns):
+                states = (self.agents[0].history[i], self.agents[1].history[i])
                 transitions = []
-                for i in range(2):
-                    next_obs, reward, done, _, _ = await tasks[i]
-                    o1, o2 = self.envs[i].get_options_both(self.envs[i].current_battle)
+                for j in range(2):
                     t = Transition(
-                        agent_state[i].obs,
-                        actions[i % 2],
-                        actions[(i + 1) % 2],
-                        o1,
-                        o2,
-                        reward,
-                        q_vals[i],
-                        hiddens[i])
+                        states[j].obs,
+                        self.agents[j].actions[i],
+                        self.agents[1-j].actions[i],
+                        states[i].legal_moves_idx,
+                        states[i].legal_moves_opponent_idx,
+                        0,
+                        self.agents[0].qs[i],
+                        states[i].hidden_state)
                     transitions.append(t)
-                    agent_state[i].update(
-
-                    )
-
-                episode_steps += 1
-                actor_steps += 1
+                if i == num_turns - 1:
+                    for j in range(2):
+                        transitions[j].reward = 1 if self.agents[j].n_battles_won() == 1 else -1
                 self.local_buffer.add(transitions[0], transitions[1])
 
-                # making a change to just export a single game as block
-                # since they are shorter than the episodes the paper uses anyway
-                if done:
-                    blocks = self.local_buffer.finish()
-                    self.sample_queue.put(blocks[0])
-                    self.sample_queue.put(blocks[1])
+            num_games += num_turns
+            blocks = self.local_buffer.finish()
+            self.sample_queue.put(blocks[0])
+            self.sample_queue.put(blocks[1])
 
-                else:
-                    # do something idk
-                    pass
-
-                if actor_steps % 400 == 0:
-                    self.update_weights()
+            if num_games % 20 == 0:
+                self.update_weights()
 
     def update_weights(self):
         '''load the latest weights from shared model'''
         self.model.load_state_dict(self.shared_model.state_dict())
+        for agent in self.agents:
+            agent.set_model(self.model)
 
-    async def reset(self):
-        await self.envs[0].agent.battle_against(self.envs[0].agent)
-        """result1 = asyncio.create_task(self.envs[0].reset())
-        result2 = asyncio.create_task(self.envs[1].reset())
-        obs1 = await result1
-        obs2 = await result2"""
+    def reset(self):
+        for agent in self.agents:
+            agent.reset()
         self.local_buffer.reset()
 
-        state1 = AgentState(torch.from_numpy(obs1).unsqueeze(0))
-        state2 = AgentState(torch.from_numpy(obs2).unsqueeze(0))
-        return state1, state2

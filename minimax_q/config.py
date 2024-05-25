@@ -7,7 +7,7 @@ batch_size = 64
 learning_starts = 50000
 save_interval = 500
 target_net_update_interval = 2000
-gamma = 0.96
+gamma = 1
 prio_exponent = 0.9
 importance_sampling_exponent = 0.6
 

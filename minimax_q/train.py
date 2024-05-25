@@ -4,7 +4,7 @@ import torch.multiprocessing as mp
 import torch
 import numpy as np
 from minimax_q.worker import Learner, Actor, ReplayBuffer
-from minimax_q.minimaxq import Minimax, MinimaxDummy
+from minimax_q.minimaxq import Minimax
 from minimax_q.r2d2 import Network
 import minimax_q.config as config
 
@@ -13,6 +13,7 @@ torch.manual_seed(0)
 np.random.seed(0)
 random.seed(0)
 torch.set_num_threads(1)
+mp.set_start_method('fork')
 
 
 def get_epsilon(actor_id: int, base_eps: float = config.base_eps, alpha: float = config.alpha, num_actors: int = config.num_actors):
@@ -25,7 +26,7 @@ def wrap_run(actor):
 
 
 def train(num_actors=config.num_actors, log_interval=config.log_interval):
-    env = MinimaxDummy(None)
+    env = Minimax(None, None)
 
     model = Network(env.action_space.shape[0], env.observation_space.shape[0], config.hidden_dim)
     del env

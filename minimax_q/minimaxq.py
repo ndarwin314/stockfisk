@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from gymnasium.spaces import Space, Box, MultiDiscrete
+from gymnasium import Env
 import nashpy
 
 from poke_env.player import Gen8EnvSinglePlayer, EnvPlayer, Player, BattleOrder
@@ -16,9 +17,10 @@ action_space[uk_mon_idx] = 6
 
 
 def get_options_both(battle: Battle) -> tuple[Option, Option]:
-    self_moves = battle.available_moves
-    self_switches = battle.available_switches
-    opponent_switches = [mon[3:] for mon in battle.opponent_team if not battle.opponent_team[mon].fainted]
+    self_moves = [move.id for move in battle.available_moves]
+    self_switches = [mon.species for mon in battle.available_switches]
+    opponent_switches = [battle.opponent_team[mon].species for mon in battle.opponent_team if
+                         not (battle.opponent_team[mon].fainted or battle.opponent_team[mon].active)]
     opponent_unrevealed = 6 - len(opponent_switches)
     if opponent_unrevealed != 0:
         opponent_switches.append("UNKNOWN")
@@ -31,8 +33,8 @@ def get_options_both(battle: Battle) -> tuple[Option, Option]:
     opponent_unrevealed_moves = 4 - len(opponent_moves)
     if opponent_unrevealed_moves != 0:
         opponent_moves.append("UNKNOWN")
-    return (Option(self_moves, self_switches, 0, 0),
-            Option(opponent_moves, opponent_switches,
+    return (Option(self_switches, self_moves, 0, 0),
+            Option(opponent_switches, opponent_moves,
              opponent_unrevealed, opponent_unrevealed_moves))
 
 
@@ -45,29 +47,41 @@ def get_option_idxs(option: Option) -> list[int]:
     return idxs
 
 
-def decode_move(idx):
-    return dex_lookup.get(idx, move_lookup[idx])
-
-
 low = np.array([-1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 high = np.array([3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1])
 
 
-class MinimaxDummy(Player):
+class Minimax(Player, Env):
     action_space = MultiDiscrete(action_space)
     observation_space = Box(low, high)
 
     def __init__(self, model, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(battle_format="gen8randombattles", *args, **kwargs)
         self.policy: Network = model
-        #self.history = []
+        self.history = []
+        self.actions = []
+        self.qs = []
         self.hidden = None
+        self.rng = np.random.default_rng()
+        self._reward_buffer: dict[AbstractBattle, float] = {}
 
     def set_policy(self, policy: Network):
         self.policy = policy
 
+    def decode_move(self, battle: Battle, idx: int):
+        if idx in dex_lookup:
+            temp = dex_lookup[idx]
+            for mon in battle.available_switches:
+                if mon.species == temp:
+                    temp = mon
+                    break
+        else:
+            temp = move_lookup[idx]
+            temp = battle.active_pokemon.moves[temp]
+        return BattleOrder(temp)
+
     # TODO: add dynamax shit
-    def choose_move(self, battle: Battle) -> str:
+    def choose_move(self, battle: Battle):
         # steps:
         # 1. decode battle to encoding
         # get possible actions for both players
@@ -76,21 +90,28 @@ class MinimaxDummy(Player):
         opponent_idxs = get_option_idxs(options2)
         state_embedding = self.embed_battle(battle)
         agent_state = AgentState(
-            state_embedding,
+            torch.tensor(state_embedding),
             self.hidden,
             self_idxs,
             opponent_idxs,
             options2.unrevealed_pokemon,
             options2.unrevealed_moves)
-        # 2. pass into model
+        self.history.append(agent_state)
+        # 2. pass into modelx
         with torch.no_grad():
-            q_matrix, hidden = self.model(agent_state)
+            q_matrix, hidden = self.policy(agent_state)
         self.hidden = hidden
+        if q_matrix.shape[0] == 0:
+            return self.choose_random_move(battle)
         game = nashpy.Game(q_matrix)
-        pa, pb = game.support_enumeration(tol=1e-6)
-        move = np.random.choice(agent_state.legal_moves_idx, pa)
+        test = game.support_enumeration(tol=1e-6)
+        pa, pb = next(test)
+        q = game[pa, pb][0]
+        self.qs.append(q)
+        move = self.rng.choice(agent_state.legal_moves_idx, p=pa)
+        self.actions.append(move)
         # 3. decode output
-        return decode_move(move)
+        return self.decode_move(battle, move)
 
     # TODO: tune this
     def calc_reward(self, last_battle, current_battle) -> float:
@@ -150,12 +171,98 @@ class MinimaxDummy(Player):
         self.last_battle = self.current_battle
         return self._observations.get(), self.get_additional_info()"""
 
+    def reset(self, **kwargs):
+        super().reset(**kwargs)
+        self.hidden = None
+        self.history = []
+        self.actions = []
+        self.qs = []
 
-class Minimax(MinimaxDummy, EnvPlayer):
-    
-    def __init__(self, opponent, model, *args, **kwargs):
-        MinimaxDummy.__init__(self, model, *args, **kwargs)
-        EnvPlayer.__init__(self, opponent, *args, **kwargs)
+    def set_model(self, model: Network):
+        self.policy = model
 
-    def action_to_move(self, action: int, battle: AbstractBattle) -> BattleOrder:
-        return
+    def reward_computing_helper(
+        self,
+        battle: AbstractBattle,
+        *,
+        fainted_value: float = 0.0,
+        hp_value: float = 0.0,
+        number_of_pokemons: int = 6,
+        starting_value: float = 0.0,
+        status_value: float = 0.0,
+        victory_value: float = 1.0,
+    ) -> float:
+        """A helper function to compute rewards.
+
+        The reward is computed by computing the value of a game state, and by comparing
+        it to the last state.
+
+        State values are computed by weighting different factor. Fainted pokemons,
+        their remaining HP, inflicted statuses and winning are taken into account.
+
+        For instance, if the last time this function was called for battle A it had
+        a state value of 8 and this call leads to a value of 9, the returned reward will
+        be 9 - 8 = 1.
+
+        Consider a single battle where each player has 6 pokemons. No opponent pokemon
+        has fainted, but our team has one fainted pokemon. Three opposing pokemons are
+        burned. We have one pokemon missing half of its HP, and our fainted pokemon has
+        no HP left.
+
+        The value of this state will be:
+
+        - With fainted value: 1, status value: 0.5, hp value: 1:
+            = - 1 (fainted) + 3 * 0.5 (status) - 1.5 (our hp) = -1
+        - With fainted value: 3, status value: 0, hp value: 1:
+            = - 3 + 3 * 0 - 1.5 = -4.5
+
+        :param battle: The battle for which to compute rewards.
+        :type battle: AbstractBattle
+        :param fainted_value: The reward weight for fainted pokemons. Defaults to 0.
+        :type fainted_value: float
+        :param hp_value: The reward weight for hp per pokemon. Defaults to 0.
+        :type hp_value: float
+        :param number_of_pokemons: The number of pokemons per team. Defaults to 6.
+        :type number_of_pokemons: int
+        :param starting_value: The default reference value evaluation. Defaults to 0.
+        :type starting_value: float
+        :param status_value: The reward value per non-fainted status. Defaults to 0.
+        :type status_value: float
+        :param victory_value: The reward value for winning. Defaults to 1.
+        :type victory_value: float
+        :return: The reward.
+        :rtype: float
+        """
+        if battle not in self._reward_buffer:
+            self._reward_buffer[battle] = starting_value
+        current_value = 0
+
+        for mon in battle.team.values():
+            current_value += mon.current_hp_fraction * hp_value
+            if mon.fainted:
+                current_value -= fainted_value
+            elif mon.status is not None:
+                current_value -= status_value
+
+        current_value += (number_of_pokemons - len(battle.team)) * hp_value
+
+        for mon in battle.opponent_team.values():
+            current_value -= mon.current_hp_fraction * hp_value
+            if mon.fainted:
+                current_value += fainted_value
+            elif mon.status is not None:
+                current_value += status_value
+
+        current_value -= (number_of_pokemons - len(battle.opponent_team)) * hp_value
+
+        if battle.won:
+            current_value += victory_value
+        elif battle.lost:
+            current_value -= victory_value
+
+        to_return = current_value - self._reward_buffer[battle]
+        self._reward_buffer[battle] = current_value
+
+        return to_return
+
+
