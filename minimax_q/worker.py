@@ -4,7 +4,7 @@ import os
 import math
 from copy import deepcopy
 from typing import List, Tuple, Any
-import threading
+import aioprocessing as aio
 from dataclasses import dataclass
 import asyncio
 
@@ -23,6 +23,15 @@ from minimax_q.priority_tree import PriorityTree
 import minimax_q.config as config
 
 
+def value_rescale(value, eps=1e-3):
+    return value.sign() * ((value.abs() + 1).sqrt() - 1) + eps * value
+
+
+def inverse_value_rescale(value, eps=1e-3):
+    temp = ((1 + 4 * eps * (value.abs() + 1 + eps)).sqrt() - 1) / (2 * eps)
+    return value.sign() * (temp.square() - 1)
+
+
 ############################## Replay Buffer ##############################
 
 
@@ -33,6 +42,8 @@ class Block:
     opponent_action: np.array
     legal_actions: Any
     predicted_legal_actions: Any
+    unrevealed_pokemon: np.ndarray
+    unrevealed_moves: np.ndarray
     reward: np.array
     hidden: list[tuple[torch.tensor, torch.tensor]]
     size: int
@@ -65,7 +76,7 @@ class ReplayBuffer:
         self.last_training_steps = 0
         self.sum_loss = 0
 
-        self.lock = threading.Lock()
+        self.lock = aio.AioLock()
 
         self.size = 0
         self.last_size = 0
@@ -78,13 +89,13 @@ class ReplayBuffer:
         return self.size
 
     def run(self):
-        background_thread = threading.Thread(target=self.add_data, daemon=True)
+        background_thread = aio.AioProcess(target=self.add_data, daemon=True)
         background_thread.start()
 
-        background_thread = threading.Thread(target=self.prepare_data, daemon=True)
+        background_thread = aio.AioProcess(target=self.prepare_data, daemon=True)
         background_thread.start()
 
-        background_thread = threading.Thread(target=self.update_data, daemon=True)
+        background_thread = aio.AioProcess(target=self.update_data, daemon=True)
         background_thread.start()
 
         log_interval = config.log_interval
@@ -323,7 +334,7 @@ class Learner:
                 time.sleep(0.1)
 
     def run(self):
-        background_thread = threading.Thread(target=self.prepare_data, daemon=True)
+        background_thread = aio.AioProcess(target=self.prepare_data, daemon=True)
         background_thread.start()
         time.sleep(2)
 
@@ -435,6 +446,8 @@ class Transition:
     action_opponent: int
     options_self: list[int]
     options_opponent: list[int]
+    unrevealed_pokemon: list[int]
+    unrevealed_moves: list[int]
     reward: int
     q_estimate: float
     hidden: tuple[torch.tensor, torch.tensor]
@@ -495,7 +508,8 @@ class LocalBuffer:
             qs = [t.q_estimate for t in self.transitions[i]]
             for j in range(forward_steps):
                 pred = np.dot(rewards[j:j+forward_steps], gamma_arr[:-1])
-                pred += gamma_arr[-1] * qs[j+forward_steps]
+                pred += gamma_arr[-1] * inverse_value_rescale(qs[j+forward_steps])
+                pred = value_rescale(pred)
                 errors[i] = abs(pred - qs[i])
 
             priority = np.mean(errors) * .9 + np.max(errors) * .1
@@ -507,6 +521,8 @@ class LocalBuffer:
                 np.array([t.opponent_action for t in self.transitions[i]]),
                 np.array([t.options_self for t in self.transitions[i]]),
                 np.array([t.options_opponent for t in self.transitions[i]]),
+                np.array([t.unrevealed_pokemon for t in self.transitions[i]]),
+                np.array([t.unrevealed_moves for t in self.transitions[i]]),
                 np.array([t.reward for t in self.transitions[i]]),
                 [t.hidden for t in self.transitions[i]],
                 self.size,
@@ -533,9 +549,8 @@ class Actor:
         num_games = 0
         while True:
             self.reset()
-
             await self.agents[0].battle_against(self.agents[1], 1)
-
+            print("battle")
             num_turns = len(self.agents[0].history)
             for i in range(num_turns):
                 states = (self.agents[0].history[i], self.agents[1].history[i])
@@ -557,7 +572,7 @@ class Actor:
                 self.local_buffer.add(transitions[0], transitions[1])
 
             num_games += num_turns
-            blocks = self.local_buffer.finish()
+            blocks, priorities = self.local_buffer.finish()
             self.sample_queue.put(blocks[0])
             self.sample_queue.put(blocks[1])
 

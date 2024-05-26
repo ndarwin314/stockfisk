@@ -13,7 +13,7 @@ class PriorityTree:
         self.prio_exponent = prio_exponent
         self.is_exponent = is_exponent
 
-    def update(self, idxes: np.ndarray, td_error: np.ndarray):
+    def update(self, idxes: np.ndarray | int, td_error: np.ndarray):
         priorities = td_error ** self.prio_exponent
 
         idxes = idxes + 2 ** (self.num_layers - 1) - 1

@@ -69,11 +69,13 @@ class AgentState:
                for idx1 in self.legal_moves_idx for idx2 in self.legal_moves_opponent_idx]
         self.advantage_input = bad
 
-    def update(self, obs, last_legal_idx, last_legal_oppponent_idx, hidden):
+    def update(self, obs, last_legal_idx, last_legal_opponent_idx, unknown_pokemon, unknown_moves, hidden):
         self.obs = torch.from_numpy(obs).unsqueeze(0)
         self.legal_moves_idx = last_legal_idx
-        self.legal_moves_opponent_idx = last_legal_oppponent_idx
+        self.legal_moves_opponent_idx = last_legal_opponent_idx
         self.hidden_state = hidden
+        self.unknown_moves = unknown_moves
+        self.unknown_pokemon = unknown_pokemon
 
 
 class Network(nn.Module):
@@ -159,7 +161,7 @@ class Network(nn.Module):
         assert hidden.size(0) == torch.sum(learning_steps)
 
         adv = self.advantage(hidden)
-        val = self.value(hidden)[legal_idx, legal_opponent_idx]
+        val = self.value(hidden)
         q_value = val + adv - adv.mean(1, keepdim=True)
 
         return q_value

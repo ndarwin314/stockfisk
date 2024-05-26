@@ -17,7 +17,7 @@ max_episode_steps = 27000
 actor_update_interval = 400
 block_length = 100  # cut one episode to numbers of blocks to improve the buffer space utilization
 
-num_actors = cpu_count()
+num_actors = 1 # cpu_count()
 base_eps = 0.4
 alpha = 7
 log_interval = 5
