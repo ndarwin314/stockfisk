@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import copy
 import random
 from copy import deepcopy
 import os
@@ -12,7 +13,7 @@ import numpy as np
 from torch import nn
 from minimax_q.worker import Learner, Actor, ReplayBuffer, Transition, LocalBuffer, PriorityTree, Block, value_rescale, inverse_value_rescale
 from minimax_q.minimaxq import Minimax
-from minimax_q.r2d2 import Network, AgentState, uk_mon_idx, uk_move_idx,move_lookup, dex_lookup
+from minimax_q.r2d2 import Network, AgentState, uk_mon_idx, uk_move_idx,move_lookup, dex_lookup, noop_idx, combined_lookup
 import minimax_q.config as config
 
 
@@ -75,6 +76,7 @@ class ReplayBufferSync:
         self.priority_tree.update(self.ptr, priority)
         self.buffer[self.ptr] = block
         self.ptr = (self.ptr + 1) % self.capacity
+        self.size += 1
         
     def update_priorities(self, idxes, td_errors, old_ptr):
         if self.ptr > old_ptr:
@@ -91,110 +93,144 @@ class ReplayBufferSync:
 
     def sample(self, num_samples) -> (np.ndarray, list[Block]):
         idxes, is_weights = self.priority_tree.sample(num_samples)
-        return idxes, self.buffer[idxes], is_weights
+        blocks = []
+        for idx in idxes:
+            blocks.append(self.buffer[idx])
+        return idxes, blocks, torch.from_numpy(is_weights), self.ptr
         
 
 async def train_single_actor():
-    env = Minimax(None, None)
+    env = Minimax(None)
 
-    model = Network(env.action_space.shape[0], env.observation_space.shape[0], config.hidden_dim)
+    batch_size = 2
+    games_per_run = 1
+    min_buffer_size = 2 * batch_size
+    model = Network(env.action_space.shape[0], env.observation_size, config.hidden_dim)
     target_model = deepcopy(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, eps=config.eps)
-    loss_fn = nn.MSELoss(reduction='none')
+    loss_fn = nn.MSELoss(reduction="sum")
     del env
     #model.share_memory()
 
     local_buffer = LocalBuffer()
     replay_buffer = ReplayBufferSync(1000)
     agents = (Minimax(model), Minimax(model))
-
     gamma_n = config.gamma ** config.forward_steps
     num_updates = 0
     while True:
         print(num_updates)
-        for _ in range(10):
+        for _ in range(games_per_run):
             await agents[0].battle_against(agents[1], 1)
-            print("battle")
-            num_turns = len(agents[0].history)
+            num_turns = agents[0].turn
+            if num_turns <= 10:
+                print("short")
+                continue
             for i in range(num_turns):
+                actions = (agents[0].actions[i], agents[1].actions[i])
                 states = (agents[0].history[i], agents[1].history[i])
-                transitions = []
+                qs = (agents[0].qs[i], agents[1].qs[i])
+                max_len = max(len(actions[0]), len(actions[1]))
                 for j in range(2):
-                    t = Transition(
-                        states[j].obs,
-                        agents[j].actions[i],
-                        agents[1 - j].actions[i],
-                        states[i].legal_moves_idx,
-                        states[i].legal_moves_opponent_idx,
-                        states[i].unknown_pokemon,
-                        states[i].unknown_moves,
-                        0,
-                        agents[0].qs[i],
-                        states[i].hidden_state)
-                    transitions.append(t)
-                if i == num_turns - 1:
+                    while len(actions[j]) < max_len:
+                        actions[j].append(noop_idx)
+                        c = copy.deepcopy(states[j][-1])
+                        states[j].append(c)
+                        states[j][-1].legal_moves_idx = [noop_idx]
+                        qs[j].append(qs[j][-1])
+                for k in range(max_len):
+                    transitions = []
                     for j in range(2):
-                        transitions[j].reward = 1 if agents[j].n_battles_won() == 1 else -1
-                local_buffer.add(transitions[0], transitions[1])
-
+                        t = Transition(
+                            states[j][k].obs,
+                            actions[j][k],
+                            actions[1-j][k],
+                            states[j][k].legal_moves_idx,
+                            states[j][k].legal_moves_opponent_idx,
+                            states[j][k].unknown_pokemon,
+                            states[j][k].unknown_moves,
+                            0,
+                            qs[j][k],
+                            states[j][k].hidden_state)
+                        transitions.append(t)
+                    if i == num_turns - 1:
+                        for j in range(2):
+                            transitions[j].reward = 1 if agents[j].n_won_battles == 1 and agents[j].turn < 200 else -1
+                    local_buffer.add(transitions[0], transitions[1])
             blocks, priorities = local_buffer.finish()
             replay_buffer.add(blocks[0], priorities[0])
             replay_buffer.add(blocks[1], priorities[1])
-        agents[0].reset()
-        agents[1].reset()
-        if replay_buffer.size < 500:
+            agents[0].reset()
+            agents[1].reset()
+        if replay_buffer.size < min_buffer_size:
             continue
 
-        idxes, blocks, is_weights = replay_buffer.sample(32)
-        losses = np.zeros(32)
+        idxes, blocks, is_weights, old_ptr = replay_buffer.sample(batch_size)
+        losses = torch.zeros(batch_size)
+        new_prio = np.zeros(len(blocks))
         for sample_idx, block in enumerate(blocks):
-            predicted_qs = np.zeros(block.size)
-            target_qs = np.zeros(block.size)
-            hidden = None
-            target_hidden = hidden
-            # i think that since we start the hidden state at all 0s and are doing
-            # entire episodes as batches this makes sense as hidden state initialization
-            for i in range(block.size - config.forward_steps):
-                # do forward pass
-                state = AgentState(
-                    block.obs[i],
-                    hidden,
-                    block.legal_actions[i],
-                    block.predicted_legal_actions[i],
-                    block.unrevealed_pokemon[i],
-                    block.unrevealed_moves[i]
-                )
-                q_mat, hidden = model(state)
-                predicted_qs[i] = q_mat
-                a = block.legal_actions[i].find(block.action[i])
-                opp_action = block.opponent_action[i]
-                if opp_action in block.predicted_legal_actions[i]:
-                    b = block.predicted_legal_actions[i].find(block.opponent_action[i])
-                elif opp_action in dex_lookup:
-                    b = block.predicted_legal_actions[i].find(uk_mon_idx)
-                elif opp_action in move_lookup:
-                    b = block.predicted_legal_actions[i].find(uk_move_idx)
-                else:
-                    print("huh, weird thing in action lookup")
-                    continue
-                q_val = q_mat[a, b]
-                predicted_qs[i] = q_val
+            try:
+                predicted_qs = torch.zeros(block.size)
+                target_qs = torch.zeros(block.size)
+                hidden = None
+                target_hidden = hidden
+                # i think that since we start the hidden state at all 0s and are doing
+                # entire episodes as batches this makes sense as hidden state initialization
+                for i in range(block.size - config.forward_steps):
+                    # do forward pass
+                    state = AgentState(
+                        torch.tensor(block.obs[i]),
+                        hidden,
+                        block.legal_actions[i],
+                        block.predicted_legal_actions[i],
+                        block.unrevealed_pokemon[i],
+                        block.unrevealed_moves[i]
+                    )
+                    q_mat, hidden = model(state)
+                    a = block.legal_actions[i].index(block.action[i])
+                    opp_action = block.opponent_action[i]
+                    if opp_action == noop_idx:
+                        assert len(block.predicted_legal_actions[i]) == 1
+                        b = 0
+                    elif opp_action in block.predicted_legal_actions[i]:
+                        b = block.predicted_legal_actions[i].index(block.opponent_action[i])
+                    elif opp_action in dex_lookup:
+                        b = block.predicted_legal_actions[i].index(uk_mon_idx)
+                    elif opp_action in move_lookup:
+                        b = block.predicted_legal_actions[i].index(uk_move_idx)
+                    else:
+                        print("huh, weird thing in action lookup")
+                        continue
+                    q_val = q_mat[a, b]
+                    predicted_qs[i] = q_val
 
-                if i > config.burn_in_steps + config.forward_steps:
-                    game = nashpy.Game(q_mat)
-                    a, b = next(game.support_enumeration())
-                    state.hidden_state = target_hidden
-                    q_mat, target_hidden = target_model(state)
-                    target_qs[i - config.forward_steps] = nashpy.Game(q_mat)[a, b]
-            losses[sample_idx] = loss_fn(
-                predicted_qs[config.burn_in_steps:-config.forward_steps],
-                target_qs[config.burn_in_steps:-config.forward_steps]).mean()
+                    if i > config.burn_in_steps + config.forward_steps:
+                        q_mat, hidden = model(state)
+                        q_mat = q_mat.detach().numpy()
+                        game = nashpy.Game(q_mat)
+                        a, b = next(game.support_enumeration())
+                        state.hidden_state = target_hidden
+                        q_mat, target_hidden = target_model(state)
+                        q_mat = q_mat.detach().numpy()
+                        q = nashpy.Game(q_mat)[a, b][0]
+                        target_qs[i - config.forward_steps] = q
+                losses[sample_idx] = loss_fn(
+                    predicted_qs[config.burn_in_steps:-config.forward_steps],
+                    target_qs[config.burn_in_steps:-config.forward_steps])
+                error = torch.abs(predicted_qs[config.burn_in_steps:-config.forward_steps]-
+                               target_qs[config.burn_in_steps:-config.forward_steps])
+                priority = torch.mean(error) * .9 + torch.max(error) * .1
+            except KeyError as e:
+                print(e)
+                priority = 0
+                losses[sample_idx] = 0
+            new_prio[sample_idx] = priority
         loss = (is_weights * losses).mean()
         loss.backward()
         optimizer.step()
         num_updates += 1
         agents[0].set_model(model)
         agents[1].set_model(model)
+        replay_buffer.update_priorities(idxes, new_prio, old_ptr)
         if num_updates % 10 == 0:
             target_model.load_state_dict(model.state_dict())
             torch.save(model.state_dict(),

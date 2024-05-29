@@ -24,12 +24,12 @@ import minimax_q.config as config
 
 
 def value_rescale(value, eps=1e-3):
-    return value.sign() * ((value.abs() + 1).sqrt() - 1) + eps * value
+    return np.sign(value) * (np.sqrt(np.abs(value) + 1) - 1) + eps * value
 
 
 def inverse_value_rescale(value, eps=1e-3):
-    temp = ((1 + 4 * eps * (value.abs() + 1 + eps)).sqrt() - 1) / (2 * eps)
-    return value.sign() * (temp.square() - 1)
+    temp = ((1 + 4 * eps * np.sqrt(np.abs(value) + 1 + eps)) - 1) / (2 * eps)
+    return np.sign(value) * (np.square(temp) - 1)
 
 
 ############################## Replay Buffer ##############################
@@ -40,8 +40,8 @@ class Block:
     obs: torch.tensor
     action: np.array
     opponent_action: np.array
-    legal_actions: Any
-    predicted_legal_actions: Any
+    legal_actions: list[list[int]]
+    predicted_legal_actions: list[list[int]]
     unrevealed_pokemon: np.ndarray
     unrevealed_moves: np.ndarray
     reward: np.array
@@ -427,11 +427,11 @@ class Learner:
 
     @staticmethod
     def value_rescale(value, eps=1e-3):
-        return value.sign() * ((value.abs() + 1).sqrt() - 1) + eps * value
+        return value.sign() * ((abs(value) + 1).sqrt() - 1) + eps * value
 
     @staticmethod
     def inverse_value_rescale(value, eps=1e-3):
-        temp = ((1 + 4 * eps * (value.abs() + 1 + eps)).sqrt() - 1) / (2 * eps)
+        temp = ((1 + 4 * eps * (abs(value) + 1 + eps)).sqrt() - 1) / (2 * eps)
         return value.sign() * (temp.square() - 1)
 
 
@@ -488,7 +488,7 @@ class LocalBuffer:
         self.size += 1
 
     def finish(self) -> (list[Block], list[float]):
-        assert self.size <= self.block_length
+        #assert self.size <= self.block_length
         burn_steps = self.burn_in_steps
         forward_steps = self.forward_steps
         training_steps = self.size - burn_steps - forward_steps
@@ -516,11 +516,11 @@ class LocalBuffer:
             priorities.append(priority)
 
             block = Block(
-                np.array([t.obs for t in self.transitions[i]]),
-                np.array([t.action for t in self.transitions[i]]),
-                np.array([t.opponent_action for t in self.transitions[i]]),
-                np.array([t.options_self for t in self.transitions[i]]),
-                np.array([t.options_opponent for t in self.transitions[i]]),
+                np.array([t.observation for t in self.transitions[i]]),
+                np.array([t.action_self for t in self.transitions[i]]),
+                np.array([t.action_opponent for t in self.transitions[i]]),
+                [t.options_self for t in self.transitions[i]],
+                [t.options_opponent for t in self.transitions[i]],
                 np.array([t.unrevealed_pokemon for t in self.transitions[i]]),
                 np.array([t.unrevealed_moves for t in self.transitions[i]]),
                 np.array([t.reward for t in self.transitions[i]]),
