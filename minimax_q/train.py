@@ -10,6 +10,7 @@ import nashpy
 import aioprocessing as aio
 import torch
 import numpy as np
+import scipy as sp
 from torch import nn
 from minimax_q.worker import Learner, Actor, ReplayBuffer, Transition, LocalBuffer, PriorityTree, Block, value_rescale, inverse_value_rescale
 from minimax_q.minimaxq import Minimax
@@ -113,9 +114,8 @@ async def train_single_actor():
     #model.share_memory()
 
     local_buffer = LocalBuffer()
-    replay_buffer = ReplayBufferSync(1000)
+    replay_buffer = ReplayBufferSync(200)
     agents = (Minimax(model), Minimax(model))
-    gamma_n = config.gamma ** config.forward_steps
     num_updates = 0
     while True:
         print(num_updates)
@@ -141,7 +141,7 @@ async def train_single_actor():
                     transitions = []
                     for j in range(2):
                         t = Transition(
-                            states[j][k].obs,
+                            sp.sparse.coo_array(states[j][k].obs),
                             actions[j][k],
                             actions[1-j][k],
                             states[j][k].legal_moves_idx,
@@ -157,6 +157,7 @@ async def train_single_actor():
                             transitions[j].reward = 1 if agents[j].n_won_battles == 1 and agents[j].turn < 200 else -1
                     local_buffer.add(transitions[0], transitions[1])
             blocks, priorities = local_buffer.finish()
+            local_buffer.reset()
             replay_buffer.add(blocks[0], priorities[0])
             replay_buffer.add(blocks[1], priorities[1])
             agents[0].reset()
@@ -219,7 +220,7 @@ async def train_single_actor():
                 error = torch.abs(predicted_qs[config.burn_in_steps:-config.forward_steps]-
                                target_qs[config.burn_in_steps:-config.forward_steps])
                 priority = torch.mean(error) * .9 + torch.max(error) * .1
-            except KeyError as e:
+            except (KeyError, AssertionError) as e:
                 print(e)
                 priority = 0
                 losses[sample_idx] = 0

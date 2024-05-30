@@ -477,6 +477,7 @@ class LocalBuffer:
         return self.size
 
     def reset(self):
+        del self.transitions
         self.curr_burn_in_steps = 0
         self.size = 0
         self.done = False

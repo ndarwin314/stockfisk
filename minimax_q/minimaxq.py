@@ -1,4 +1,5 @@
 import numpy as np
+import scipy as sp
 import torch
 from gymnasium.spaces import Space, Box, MultiDiscrete
 from gymnasium import Env
@@ -31,13 +32,14 @@ def embed_pokemon(mon: Pokemon):
     for i, stat in enumerate(["accuracy", "atk", "def", "evasion", "spa", "spd", "spe"]):
         boosts[i] = mon.boosts.get(stat, 0) / 6
     # TODO: item
-    return np.concatenate(
+    arr = np.concatenate(
         [
             one_hot,
             np.array([health]),
             moves,
             status,
             boosts])
+    return arr
 
 
 mon_embed_size = 2297
@@ -218,7 +220,7 @@ class Minimax(Player, Env):
                 embed_pokemon(battle.opponent_active_pokemon),
             ] + self_reserve + opponent_reserve
         )
-        return np.float32(final_vector)
+        return final_vector
 
     def describe_embedding(self) -> Space:
         return self.observation_space

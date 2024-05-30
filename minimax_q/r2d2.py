@@ -25,7 +25,7 @@ reverse_move_lookup = {k: i+dex_size for i, k in enumerate(moves)}
 move_lookup = {v: k for k, v in reverse_move_lookup.items()}
 uk_move_idx = reverse_move_lookup["UNKNOWN"]
 noop_idx = reverse_move_lookup["noop"]
-moves_size = len(pokedex)
+moves_size = len(move_lookup)
 action_embed_size = dex_size + moves_size
 combined_lookup = {**move_lookup, **dex_lookup}
 
