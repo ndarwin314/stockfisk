@@ -103,8 +103,8 @@ class ReplayBufferSync:
 async def train_single_actor():
     env = Minimax(None)
 
-    batch_size = 2
-    games_per_run = 1
+    batch_size = 16
+    games_per_run = 8
     min_buffer_size = 2 * batch_size
     model = Network(env.action_space.shape[0], env.observation_size, config.hidden_dim)
     target_model = deepcopy(model)
@@ -114,7 +114,7 @@ async def train_single_actor():
     #model.share_memory()
 
     local_buffer = LocalBuffer()
-    replay_buffer = ReplayBufferSync(200)
+    replay_buffer = ReplayBufferSync(1000)
     agents = (Minimax(model), Minimax(model))
     num_updates = 0
     while True:
@@ -179,17 +179,22 @@ async def train_single_actor():
                 for i in range(block.size - config.forward_steps):
                     # do forward pass
                     state = AgentState(
-                        torch.tensor(block.obs[i]),
+                        torch.tensor(block.obs[i].toarray()),
                         hidden,
                         block.legal_actions[i],
                         block.predicted_legal_actions[i],
                         block.unrevealed_pokemon[i],
                         block.unrevealed_moves[i]
                     )
+                    #print(combined_lookup[block.action[i]], [combined_lookup[x] for x in block.legal_actions[i]])
+                    #print(combined_lookup[block.opponent_action[i]], [combined_lookup[x] for x in block.predicted_legal_actions[i]])
+                    #print()
                     q_mat, hidden = model(state)
                     a = block.legal_actions[i].index(block.action[i])
                     opp_action = block.opponent_action[i]
-                    if opp_action == noop_idx:
+                    # this is pretty hacky
+                    # the second condition is a workaround for when a pokemon faints from a switching move like u-turn
+                    if opp_action == noop_idx or opp_action != noop_idx and noop_idx in block.predicted_legal_actions[i]:
                         assert len(block.predicted_legal_actions[i]) == 1
                         b = 0
                     elif opp_action in block.predicted_legal_actions[i]:
@@ -220,7 +225,7 @@ async def train_single_actor():
                 error = torch.abs(predicted_qs[config.burn_in_steps:-config.forward_steps]-
                                target_qs[config.burn_in_steps:-config.forward_steps])
                 priority = torch.mean(error) * .9 + torch.max(error) * .1
-            except (KeyError, AssertionError) as e:
+            except (KeyError, ValueError, AssertionError) as e:
                 print(e)
                 priority = 0
                 losses[sample_idx] = 0
