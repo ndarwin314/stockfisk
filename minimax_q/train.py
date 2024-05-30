@@ -210,7 +210,6 @@ async def train_single_actor():
                     predicted_qs[i] = q_val
 
                     if i > config.burn_in_steps + config.forward_steps:
-                        q_mat, hidden = model(state)
                         q_mat = q_mat.detach().numpy()
                         game = nashpy.Game(q_mat)
                         a, b = next(game.support_enumeration())
@@ -218,7 +217,9 @@ async def train_single_actor():
                         q_mat, target_hidden = target_model(state)
                         q_mat = q_mat.detach().numpy()
                         q = nashpy.Game(q_mat)[a, b][0]
-                        target_qs[i - config.forward_steps] = q
+                        # oops i forgot to add reward, silly uwu
+                        # we only have rewards at terminal states so we can do this simpler formula for target
+                        target_qs[i - config.forward_steps] = q + block.reward
                 losses[sample_idx] = loss_fn(
                     predicted_qs[config.burn_in_steps:-config.forward_steps],
                     target_qs[config.burn_in_steps:-config.forward_steps])
@@ -231,7 +232,9 @@ async def train_single_actor():
                 losses[sample_idx] = 0
             new_prio[sample_idx] = priority
         loss = (is_weights * losses).mean()
+        optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), config.grad_norm)
         optimizer.step()
         num_updates += 1
         agents[0].set_model(model)
