@@ -1,3 +1,4 @@
+import numpy
 import numpy as np
 import scipy as sp
 import torch
@@ -5,6 +6,7 @@ from gymnasium.spaces import Space, Box, MultiDiscrete
 from gymnasium import Env
 import nashpy
 from time import sleep
+from typing import Union
 
 from poke_env.player import Gen8EnvSinglePlayer, Player, BattleOrder, ForfeitBattleOrder
 from poke_env.environment import AbstractBattle, Battle, Move, SideCondition, Weather, Field, Status, Pokemon
@@ -17,6 +19,9 @@ action_space = np.ones(action_embed_size)
 action_space[uk_move_idx] = 5
 action_space[uk_mon_idx] = 6
 
+rng = np.random.default_rng()
+
+int_types = Union[int, numpy.int64, np.int32, np.int16]
 
 def embed_pokemon(mon: Pokemon):
     health = mon.current_hp_fraction
@@ -94,10 +99,11 @@ class Minimax(Player, Env):
     observation_space = Box(low, high)
     observation_size = 27691
 
-    def __init__(self, model, max_len=200, *args, **kwargs):
+    def __init__(self, model, max_len=200, epsilon=0.025, *args, **kwargs):
         super().__init__(battle_format="gen8randombattle", *args, **kwargs)
         assert 0 < max_len <= 1000
         self.max_len = max_len
+        self.epsilon = epsilon
         self.turn = 0
         self.policy: Network = model
         self.history = [[] for _ in range(max_len)]
@@ -147,10 +153,13 @@ class Minimax(Player, Env):
             self_idxs,
             opponent_idxs,
             options2.unrevealed_pokemon,
-            options2.unrevealed_moves)
+            options2.unrevealed_moves,
+            self.calc_reward(current_battle=battle)
+        )
         # 2. pass into model
         with torch.no_grad():
             q_matrix, hidden = self.policy(agent_state)
+        self.hidden = hidden
         self.hidden = hidden
         if q_matrix.shape[0] == 0:
             return self.choose_random_move(battle)
@@ -160,20 +169,33 @@ class Minimax(Player, Env):
             pa, pb = next(test)
             q = game[pa, pb][0]
             self.qs[self.turn - 1].append(q)
-            move = self.rng.choice(agent_state.legal_moves_idx, p=pa)
+            if rng.uniform() > self.epsilon:
+                move = self.rng.choice(agent_state.legal_moves_idx, p=pa)
+            else:
+                move = self.choose_random_move(battle)
         except StopIteration:
             self.qs[self.turn - 1].append(0)
             move = self.choose_random_move(battle)
-        self.actions[self.turn-1].append(move)
-        self.history[self.turn-1].append(agent_state)
-        # 3. decode output
-        #print(self.username, ": ", self.turn, ": ", self.decode_move(battle, move))
-        return self.decode_move(battle, move)
+        if isinstance(move, int_types):
+            self.actions[self.turn-1].append(move)
+            self.history[self.turn-1].append(agent_state)
+            # 3. decode output
+            #print(self.username, ": ", self.turn, ": ", self.decode_move(battle, move))
+            return self.decode_move(battle, move)
+        elif isinstance(move, BattleOrder):
+            order = move.order
+            if isinstance(order, Move):
+                move1 = reverse_move_lookup[order.id]
+            elif isinstance(order, Pokemon):
+                move1 = reverse_dex_lookup[order.species]
+            self.actions[self.turn-1].append(move1)
+            self.history[self.turn-1].append(agent_state)
+            return move
 
     # TODO: tune this
-    def calc_reward(self, last_battle, current_battle) -> float:
+    def calc_reward(self, current_battle) -> float:
         return self.reward_computing_helper(
-            current_battle, fainted_value=1.0, hp_value=.5, victory_value=10.0
+            current_battle, fainted_value=.2, hp_value=.15, status_value=.05, victory_value=3.0
         )
 
     # TODO: experiment with more expressive embeddings

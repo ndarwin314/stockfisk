@@ -1,4 +1,5 @@
 '''Replay buffer, learner and actor'''
+import copy
 import time
 import os
 import math
@@ -488,7 +489,7 @@ class LocalBuffer:
         self.transitions[1].append(transition2)
         self.size += 1
 
-    def finish(self) -> (list[Block], list[float]):
+    def finish(self, final_rewards) -> (list[Block], list[float]):
         #assert self.size <= self.block_length
         burn_steps = self.burn_in_steps
         forward_steps = self.forward_steps
@@ -503,19 +504,18 @@ class LocalBuffer:
         priorities = []
         blocks = []
         for i in range(2):
-            errors = np.zeros(forward_steps)
+            errors = np.zeros(self.size - self.forward_steps)
             rewards = [t.reward for t in self.transitions[i]]
-            rewards = rewards[burn_steps:-forward_steps]
+            rewards.append(final_rewards[i])
             qs = [t.q_estimate for t in self.transitions[i]]
-            for j in range(forward_steps):
-                pred = np.dot(rewards[j:j+forward_steps], gamma_arr[:-1])
+            for j in range(self.size - self.forward_steps):
+                pred = np.dot(rewards[j+2:j+forward_steps+2], gamma_arr[:-1])
                 pred += gamma_arr[-1] * inverse_value_rescale(qs[j+forward_steps])
                 pred = value_rescale(pred)
                 errors[i] = abs(pred - qs[i])
 
             priority = np.mean(errors) * .9 + np.max(errors) * .1
             priorities.append(priority)
-
             block = Block(
                 np.array([t.observation for t in self.transitions[i]]),
                 np.array([t.action_self for t in self.transitions[i]]),
@@ -524,7 +524,7 @@ class LocalBuffer:
                 [t.options_opponent for t in self.transitions[i]],
                 np.array([t.unrevealed_pokemon for t in self.transitions[i]]),
                 np.array([t.unrevealed_moves for t in self.transitions[i]]),
-                np.array([t.reward for t in self.transitions[i]]),
+                np.array(rewards),
                 [t.hidden for t in self.transitions[i]],
                 self.size,
             )

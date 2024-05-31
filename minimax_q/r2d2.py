@@ -63,6 +63,7 @@ class AgentState:
     legal_moves_opponent_idx: list[int] = None
     unknown_pokemon: int = 0
     unknown_moves: int = 0
+    reward: float = 0.0
 
     def __post_init__(self):
         temp1 = embed_all_moves(self.legal_moves_idx, 0, 0)
