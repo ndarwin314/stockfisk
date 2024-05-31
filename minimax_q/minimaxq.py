@@ -94,7 +94,7 @@ class Minimax(Player, Env):
     observation_space = Box(low, high)
     observation_size = 27691
 
-    def __init__(self, model, max_len=100, *args, **kwargs):
+    def __init__(self, model, max_len=200, *args, **kwargs):
         super().__init__(battle_format="gen8randombattle", *args, **kwargs)
         assert 0 < max_len <= 1000
         self.max_len = max_len
@@ -156,10 +156,14 @@ class Minimax(Player, Env):
             return self.choose_random_move(battle)
         game = nashpy.Game(q_matrix)
         test = game.support_enumeration(tol=1e-6)
-        pa, pb = next(test)
-        q = game[pa, pb][0]
-        self.qs[self.turn-1].append(q)
-        move = self.rng.choice(agent_state.legal_moves_idx, p=pa)
+        try:
+            pa, pb = next(test)
+            q = game[pa, pb][0]
+            self.qs[self.turn - 1].append(q)
+            move = self.rng.choice(agent_state.legal_moves_idx, p=pa)
+        except StopIteration:
+            self.qs[self.turn - 1].append(0)
+            move = self.choose_random_move(battle)
         self.actions[self.turn-1].append(move)
         self.history[self.turn-1].append(agent_state)
         # 3. decode output

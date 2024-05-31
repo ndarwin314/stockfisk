@@ -91,7 +91,13 @@ class Network(nn.Module):
 
         self.max_forward_steps = config.forward_steps
 
-        self.recurrent = nn.LSTM(obs_dim + 2 * action_dim, self.hidden_dim, batch_first=True)
+        self.compress = nn.Sequential(
+            nn.Linear(obs_dim + 2 * action_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, self.hidden_dim)
+        )
+
+        self.recurrent = nn.LSTM(self.hidden_dim, self.hidden_dim, batch_first=True)
 
         # instead of learning a mapping from hidden -> action x action,
         # we learn a map from hidden, action, action ->  1
@@ -111,9 +117,9 @@ class Network(nn.Module):
 
     def forward(self, state: AgentState):
 
-        recurrent_input = state.recurrent_input
+        recurrent_input = self.compress(state.recurrent_input.view(1, -1).float())
 
-        _, recurrent_output = self.recurrent(recurrent_input.view(1, -1).float(), state.hidden_state)
+        _, recurrent_output = self.recurrent(recurrent_input, state.hidden_state)
 
         hidden = recurrent_output[0].squeeze()
 

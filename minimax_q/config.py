@@ -29,7 +29,7 @@ forward_steps = 5
 seq_len = burn_in_steps + learning_steps + forward_steps
 
 # network setting
-hidden_dim = 512
+hidden_dim = 192
 
 render = False
 save_plot = True

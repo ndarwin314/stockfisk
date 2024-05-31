@@ -103,7 +103,7 @@ class ReplayBufferSync:
 async def train_single_actor():
     env = Minimax(None)
 
-    batch_size = 16
+    batch_size = 32
     games_per_run = 8
     min_buffer_size = 2 * batch_size
     model = Network(env.action_space.shape[0], env.observation_size, config.hidden_dim)
@@ -119,7 +119,8 @@ async def train_single_actor():
     num_updates = 0
     while True:
         print(num_updates)
-        for _ in range(games_per_run):
+        for badd in range(games_per_run):
+            print(num_updates, badd)
             await agents[0].battle_against(agents[1], 1)
             num_turns = agents[0].turn
             if num_turns <= 10:
@@ -176,7 +177,7 @@ async def train_single_actor():
                 target_hidden = hidden
                 # i think that since we start the hidden state at all 0s and are doing
                 # entire episodes as batches this makes sense as hidden state initialization
-                for i in range(block.size - config.forward_steps):
+                for i in range(block.size):
                     # do forward pass
                     state = AgentState(
                         torch.tensor(block.obs[i].toarray()),
@@ -219,7 +220,7 @@ async def train_single_actor():
                         q = nashpy.Game(q_mat)[a, b][0]
                         # oops i forgot to add reward, silly uwu
                         # we only have rewards at terminal states so we can do this simpler formula for target
-                        target_qs[i - config.forward_steps] = q + block.reward
+                        target_qs[i - config.forward_steps] = q + block.reward[i]
                 losses[sample_idx] = loss_fn(
                     predicted_qs[config.burn_in_steps:-config.forward_steps],
                     target_qs[config.burn_in_steps:-config.forward_steps])
@@ -227,11 +228,12 @@ async def train_single_actor():
                                target_qs[config.burn_in_steps:-config.forward_steps])
                 priority = torch.mean(error) * .9 + torch.max(error) * .1
             except (KeyError, ValueError, AssertionError) as e:
-                print(e)
+                print("oopsy", e)
                 priority = 0
                 losses[sample_idx] = 0
             new_prio[sample_idx] = priority
         loss = (is_weights * losses).mean()
+        print(loss)
         optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), config.grad_norm)
@@ -243,7 +245,7 @@ async def train_single_actor():
         if num_updates % 10 == 0:
             target_model.load_state_dict(model.state_dict())
             torch.save(model.state_dict(),
-                       os.path.join("/Users/ndarwin/PycharmProjectsk/stockfisk/models", f'{num_updates}.pth'))
+                       os.path.join("/home/mathy/PycharmProjects/stockfisk/models", f'{num_updates}.pth'))
 
 
 
