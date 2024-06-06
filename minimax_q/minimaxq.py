@@ -1,3 +1,5 @@
+import copy
+
 import numpy
 import numpy as np
 import scipy as sp
@@ -9,85 +11,182 @@ from time import sleep
 from typing import Union
 
 from poke_env.player import Gen8EnvSinglePlayer, Player, BattleOrder, ForfeitBattleOrder
-from poke_env.environment import AbstractBattle, Battle, Move, SideCondition, Weather, Field, Status, Pokemon
+from poke_env.environment import AbstractBattle, Battle, Move, SideCondition, Weather, Field, Status, Pokemon, PokemonType, EmptyMove
 
 from minimax_q.r2d2 import Network, AgentState, Option
 from minimax_q.r2d2 import reverse_move_lookup, reverse_dex_lookup, move_lookup, dex_lookup, chart, action_embed_size
 from minimax_q.r2d2 import uk_move_idx, uk_mon_idx
 
-action_space = np.ones(action_embed_size)
-action_space[uk_move_idx] = 5
-action_space[uk_mon_idx] = 6
+#action_space[uk_move_idx] = 5
+#action_space[uk_mon_idx] = 6
+boost_list = ["accuracy", "atk", "def", "evasion", "spa", "spd", "spe"]
+stat_list = ["hp", "atk", "def", "spa", "spd", "spe"]
 
 rng = np.random.default_rng()
 
 int_types = Union[int, numpy.int64, np.int32, np.int16]
 
+
+def embed_move(move: Move, real=True) -> np.ndarray:
+    base_power = (move.base_power - 0.8) / 100.0
+    accuracy = (move.accuracy - 0.8) / 100.0
+    current_pp = move.current_pp / 24
+    category = move.category.value - 1
+    category_encode = np.zeros(3)
+    category_encode[category] = 1
+    crit_ratio = move.crit_ratio
+    try:
+        damage = move.damage / 100
+    # sue me
+    except TypeError:
+        damage = 0.8
+    drain = move.drain
+    heal = move.heal
+    boosts = move.boosts
+    boost_encode = np.zeros(7)
+    if boosts is not None:
+        for k, v in boosts.items():
+            boost_encode[boost_list.index(k)] = v
+    self_boosts = move.self_boost
+    self_boost_encode = np.zeros(7)
+    if self_boosts is not None:
+        for k, v in self_boosts.items():
+            self_boost_encode[boost_list.index(k)] = v
+    drag = move.force_switch
+    priority = move.priority
+    recoil = move.recoil
+    self_switch = move.self_switch
+    secondaries = move.secondary
+    # i'm deciding to only deal with status secondary effects since there are too many
+    # nvm we are not dealing with it at all
+    side_condition = move.side_condition
+    side_encode = np.zeros(len(SideCondition))
+    if side_condition is not None:
+        idx = SideCondition.from_string(side_condition).value - 1
+        side_encode[idx] = 1
+    type = move.type.value - 1
+    type_encode = np.zeros(len(PokemonType))
+    type_encode[type] = 1
+    scalars = [
+        real,
+        base_power,
+        accuracy,
+        current_pp,
+        crit_ratio,
+        damage,
+        drain,
+        heal,
+        priority,
+        recoil,
+        self_switch,
+        drag
+    ]
+    test = [np.array(scalars), category_encode, type_encode, side_encode, boost_encode, self_boost_encode]
+    return np.concatenate(test)
+
+
+move_size = 69
+empty_move_embed = np.zeros(move_size)
+empty_move_embed[0] = 1
+noop_move_embed = np.zeros(move_size)
+
+
 def embed_pokemon(mon: Pokemon):
     health = mon.current_hp_fraction
-    one_hot = np.zeros(len(dex_lookup))
-    one_hot[reverse_dex_lookup[mon.species]] = 1.0
-    moves = np.zeros(len(move_lookup))
-    for k, v in mon.moves.items():
-        moves[reverse_move_lookup[k] - len(dex_lookup)] = v.current_pp / 24
+    alive = not mon.fainted
+    stats = np.zeros(6)
+    for i, v in enumerate(mon.base_stats.values()):
+        stats[i] = v / 100
+    move_list = mon.moves
+    moves = []
+    for v in move_list.values():
+        moves.append(embed_move(v))
+    while len(moves) < 4:
+        moves.append(empty_move_embed)
+    type_encode = np.zeros(2 * len(PokemonType))
+    type1 = mon.type_1.value - 1
+    type_encode[type1] = 1
+    type2 = mon.type_2
+    if type2 is not None:
+        type_encode[type2.value - 1 + len(PokemonType)] = 1
+
     status = np.zeros(len(Status))
     if mon.status is not None:
         status[mon.status.value - 1] = 1.0
     boosts = np.zeros(7)
-    for i, stat in enumerate(["accuracy", "atk", "def", "evasion", "spa", "spd", "spe"]):
+    for i, stat in enumerate(boost_list):
         boosts[i] = mon.boosts.get(stat, 0) / 6
-    # TODO: item
+    # TODO: item and ability
     arr = np.concatenate(
         [
-            one_hot,
-            np.array([health]),
-            moves,
+            np.array([alive, health]),
+            stats,
             status,
-            boosts])
+            boosts,
+            type_encode
+        ] + moves)
     return arr
 
 
-mon_embed_size = 2297
+mon_embed_size = 2 + 6 + len(Status) + 7 + 2 * len(PokemonType) + 4 * move_size
 empty_mon_embed = np.zeros(mon_embed_size)
+action_space = np.ones(move_size + mon_embed_size)
 
 
 def get_options_both(battle: Battle) -> tuple[Option, Option]:
     self_moves = [move.id for move in battle.available_moves]
+    move_embeddings = [embed_move(move) for move in battle.available_moves]
     self_switches = [mon.species for mon in battle.available_switches]
-    self_option = Option(self_switches, self_moves, 0, 0)
+    mon_embeddings = [embed_pokemon(mon) for mon in battle.available_switches]
+    self_option = Option(self_switches, self_moves, 0, 0, mon_embeddings, move_embeddings)
     # kinda hacky but this should check if the user has a move but the opponent doesnt
     # because either switching from faint/switch move
     if (battle.active_pokemon.fainted) or len(self_moves) == 0:
         opponent_switches = []
+        mon_embeddings = []
         opponent_moves = ["noop"]
+        move_embeddings = [noop_move_embed]
         opponent_unrevealed = 0
         opponent_unrevealed_moves = 0
     else:
         opponent_switches = [battle.opponent_team[mon].species for mon in battle.opponent_team if
                              not (battle.opponent_team[mon].fainted or battle.opponent_team[mon].active)]
         opponent_unrevealed = 6 - len(opponent_switches)
+        mon_embeddings = [embed_pokemon(battle.opponent_team[mon]) for mon in battle.opponent_team if
+                             not (battle.opponent_team[mon].fainted or battle.opponent_team[mon].active)]
         if opponent_unrevealed != 0:
             opponent_switches.append("UNKNOWN")
+            c = copy.copy(empty_mon_embed)
+            c[0] = 1
+            mon_embeddings.append(c)
         for data in battle.opponent_team.values():
             if data.active:
                 opponent_moves = list(data.moves.keys())
+                move_embeddings = [embed_move(move) for move in data.moves.values()]
                 break
         else:
             raise ValueError("no active pokemon in opponents team")
         opponent_unrevealed_moves = 4 - len(opponent_moves)
         if opponent_unrevealed_moves != 0:
             opponent_moves.append("UNKNOWN")
-    opponent_option = Option(opponent_switches, opponent_moves, opponent_unrevealed, opponent_unrevealed_moves)
+            move_embeddings.append(empty_move_embed)
+    opponent_option = Option(opponent_switches, opponent_moves, opponent_unrevealed, opponent_unrevealed_moves, mon_embeddings, move_embeddings)
     return self_option, opponent_option
 
 
-def get_option_idxs(option: Option) -> list[int]:
+def get_option_idxs(option: Option) -> (list[int], dict[int, np.array]):
     idxs = []
-    for mon in option.pokemon:
-        idxs.append(reverse_dex_lookup[mon])
-    for move in option.moves:
-        idxs.append(reverse_move_lookup[move])
-    return idxs
+    embeddings = {}
+    for mon, embed in zip(option.pokemon, option.pokemon_embeddings):
+        idx = reverse_dex_lookup[mon]
+        idxs.append(idx)
+        embeddings[idx] = np.concatenate([embed, empty_move_embed])
+    for move, embed in zip(option.moves, option.move_embeddings):
+        idx = reverse_move_lookup[move]
+        idxs.append(idx)
+        embeddings[idx] = np.concatenate([empty_mon_embed, embed])
+    return idxs, embeddings
+
 
 
 low = np.array([-1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
@@ -97,10 +196,10 @@ high = np.array([3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1])
 class Minimax(Player, Env):
     action_space = MultiDiscrete(action_space)
     observation_space = Box(low, high)
-    observation_size = 27691
+    observation_size = 4183
 
-    def __init__(self, model, max_len=200, epsilon=0.025, *args, **kwargs):
-        super().__init__(battle_format="gen8randombattle", *args, **kwargs)
+    def __init__(self, model, max_len=200, epsilon=0.2, account_configuration=None, *args, **kwargs):
+        super().__init__(battle_format="gen8randombattle", account_configuration=account_configuration, *args, **kwargs)
         assert 0 < max_len <= 1000
         self.max_len = max_len
         self.epsilon = epsilon
@@ -144,17 +243,19 @@ class Minimax(Player, Env):
         # 1. decode battle to encoding
         # get possible actions for both players
         options1, options2 = get_options_both(battle)
-        self_idxs = get_option_idxs(options1)
-        opponent_idxs = get_option_idxs(options2)
+        self_idxs, self_embeds = get_option_idxs(options1)
+        opponent_idxs, opponent_embeds = get_option_idxs(options2)
         state_embedding = self.embed_battle(battle)
         agent_state = AgentState(
-            torch.tensor(state_embedding),
+            state_embedding,
             self.hidden,
             self_idxs,
             opponent_idxs,
             options2.unrevealed_pokemon,
             options2.unrevealed_moves,
-            self.calc_reward(current_battle=battle)
+            self.calc_reward(current_battle=battle),
+            self_embeds,
+            opponent_embeds
         )
         # 2. pass into model
         with torch.no_grad():
@@ -168,6 +269,7 @@ class Minimax(Player, Env):
         try:
             pa, pb = next(test)
             q = game[pa, pb][0]
+            print(q)
             self.qs[self.turn - 1].append(q)
             if rng.uniform() > self.epsilon:
                 move = self.rng.choice(agent_state.legal_moves_idx, p=pa)
@@ -195,7 +297,7 @@ class Minimax(Player, Env):
     # TODO: tune this
     def calc_reward(self, current_battle) -> float:
         return self.reward_computing_helper(
-            current_battle, fainted_value=.2, hp_value=.15, status_value=.05, victory_value=3.0
+            current_battle, fainted_value=.2, hp_value=.05, status_value=.03, victory_value=3.0
         )
 
     # TODO: experiment with more expressive embeddings
@@ -270,6 +372,7 @@ class Minimax(Player, Env):
         self.opponent_actions = [[] for _ in range(self.max_len)]
         self.qs = [[] for _ in range(self.max_len)]
         self.turn = 0
+        self._battles = {}
 
     def set_model(self, model: Network):
         self.policy = model

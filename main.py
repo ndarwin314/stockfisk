@@ -6,26 +6,22 @@ from minimax_q.minimaxq import Minimax
 import minimax_q.config as config
 import asyncio
 import time
+import torch
 from gymnasium.utils.env_checker import check_env
-from minimax_q.train import train_single_actor
+from minimax_q.train import train_single_actor, train
+from poke_env import AccountConfiguration, ShowdownServerConfiguration
 
 
 async def test():
-    start = time.time()
-    model = Network(Minimax.action_space.shape[0], Minimax.observation_space.shape[0], config.hidden_dim)
-    opponent = RandomPlayer(battle_format="gen8randombattle")
-    train_env = Minimax(model=model)
-    print("test")
-    await train_env.battle_against(opponent, n_battles=1)
-
-    print(
-        "Max damage player won %d / 1 battles [this took %f seconds]"
-        % (
-            train_env.n_won_battles, time.time() - start
-        )
-    )
+    env = Minimax(None)
+    start_iter = 2740
+    model = Network(env.action_space.shape[0], env.observation_size, config.hidden_dim)
+    model.load_state_dict(torch.load(f"/home/mathy/PycharmProjects/stockfisk/models/{start_iter}.pth"))
+    model.eval()
+    agent = Minimax(model, epsilon=.05)
+    await agent.ladder(1000)
 
 
 if __name__ == "__main__":
-    asyncio.run(train_single_actor())
+    asyncio.run(train())
 

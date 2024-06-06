@@ -1,5 +1,3 @@
-from multiprocessing import cpu_count
-
 lr = 1e-4
 eps = 1e-3
 grad_norm = 40
@@ -29,7 +27,7 @@ forward_steps = 5
 seq_len = burn_in_steps + learning_steps + forward_steps
 
 # network setting
-hidden_dim = 192
+hidden_dim = 256
 
 render = False
 save_plot = True

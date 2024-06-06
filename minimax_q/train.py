@@ -13,7 +13,7 @@ import numpy as np
 import scipy as sp
 from torch import nn
 from minimax_q.worker import Learner, Actor, ReplayBuffer, Transition, LocalBuffer, PriorityTree, Block, value_rescale, inverse_value_rescale
-from minimax_q.minimaxq import Minimax
+from minimax_q.minimaxq import Minimax, move_size, mon_embed_size
 from minimax_q.r2d2 import Network, AgentState, uk_mon_idx, uk_move_idx,move_lookup, dex_lookup, noop_idx, combined_lookup
 import minimax_q.config as config
 
@@ -34,7 +34,7 @@ def wrap_run(actor):
 
 
 def train(num_actors=config.num_actors, log_interval=config.log_interval):
-    env = Minimax(None, None)
+    env = Minimax(None, 200)
 
     model = Network(env.action_space.shape[0], env.observation_space.shape[0], config.hidden_dim)
     del env
@@ -103,10 +103,12 @@ class ReplayBufferSync:
 async def train_single_actor():
     env = Minimax(None)
 
-    batch_size = 32
-    games_per_run = 8
+    start_iter = 3720
+    batch_size = 64
+    games_per_run = 16
     min_buffer_size = 2 * batch_size
     model = Network(env.action_space.shape[0], env.observation_size, config.hidden_dim)
+    model.load_state_dict(torch.load(f"/home/mathy/PycharmProjects/stockfisk/models/{start_iter}.pth"))
     target_model = deepcopy(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, eps=config.eps)
     loss_fn = nn.MSELoss(reduction="mean")
@@ -114,9 +116,9 @@ async def train_single_actor():
     #model.share_memory()
 
     local_buffer = LocalBuffer()
-    replay_buffer = ReplayBufferSync(1000)
+    replay_buffer = ReplayBufferSync(400)
     agents = (Minimax(model), Minimax(model))
-    num_updates = 0
+    num_updates = start_iter
     gamma_n = config.gamma ** config.forward_steps
     gamma_arr = config.gamma ** torch.arange(0, config.forward_steps).float()
     while True:
@@ -137,8 +139,9 @@ async def train_single_actor():
                         actions[j].append(noop_idx)
                         c = copy.deepcopy(states[j][-1])
                         c.reward = 0
+                        c.embeddings_self = {noop_idx: np.zeros(mon_embed_size+move_size)}
+                        c.legal_moves_idx = [noop_idx]
                         states[j].append(c)
-                        states[j][-1].legal_moves_idx = [noop_idx]
                         qs[j].append(qs[j][-1])
                 for k in range(max_len):
                     transitions = []
@@ -153,7 +156,10 @@ async def train_single_actor():
                             states[j][k].unknown_moves,
                             states[j][k].reward,
                             qs[j][k],
-                            states[j][k].hidden_state)
+                            states[j][k].hidden_state,
+                            states[j][k].embeddings_self,
+                            states[j][k].embeddings_opponent,
+                        )
                         transitions.append(t)
                     local_buffer.add(transitions[0], transitions[1])
             temp = agents[0].calc_reward(list(agents[0].battles.values())[-1])
@@ -181,12 +187,15 @@ async def train_single_actor():
                 for i in range(block.size):
                     # do forward pass
                     state = AgentState(
-                        torch.tensor(block.obs[i].toarray()),
+                        block.obs[i].toarray(),
                         hidden,
                         block.legal_actions[i],
                         block.predicted_legal_actions[i],
                         block.unrevealed_pokemon[i],
-                        block.unrevealed_moves[i]
+                        block.unrevealed_moves[i],
+                        rewards[i],
+                        block.embeddings_self[i],
+                        block.embeddings_opponent[i]
                     )
                     #print(combined_lookup[block.action[i]], [combined_lookup[x] for x in block.legal_actions[i]])
                     #print(combined_lookup[block.opponent_action[i]], [combined_lookup[x] for x in block.predicted_legal_actions[i]])
@@ -210,8 +219,6 @@ async def train_single_actor():
                         continue
                     q_val = q_mat[a, b]
                     predicted_qs[i] = q_val
-                    if i == block.size-1:
-                        pass
                     if i > config.burn_in_steps + config.forward_steps:
                         q_mat = q_mat.detach().numpy()
                         game = nashpy.Game(q_mat)
@@ -246,7 +253,7 @@ async def train_single_actor():
         agents[0].set_model(model)
         agents[1].set_model(model)
         replay_buffer.update_priorities(idxes, new_prio, old_ptr)
-        if num_updates % 1 == 0:
+        if num_updates % 20 == 0:
             target_model.load_state_dict(model.state_dict())
             torch.save(model.state_dict(),
                        os.path.join("/home/mathy/PycharmProjects/stockfisk/models", f'{num_updates}.pth'))

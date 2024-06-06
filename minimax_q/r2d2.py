@@ -29,8 +29,15 @@ moves_size = len(move_lookup)
 action_embed_size = dex_size + moves_size
 combined_lookup = {**move_lookup, **dex_lookup}
 
-Option = namedtuple('Option',
-                    ('pokemon', "moves", "unrevealed_pokemon", "unrevealed_moves"))
+
+@dataclass
+class Option:
+    pokemon: list[str]
+    moves: list[str]
+    unrevealed_pokemon: int
+    unrevealed_moves: int
+    pokemon_embeddings: list[np.array]
+    move_embeddings: list[np.array]
 
 
 def embed_all_moves(idxs, unrevealed_mons: int, unrevealed_moves: int):
@@ -57,20 +64,21 @@ def embed_idx(idx1, idx2, mon, move):
 
 @dataclass
 class AgentState:
-    obs: torch.Tensor
+    obs: np.array
     hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     legal_moves_idx: list[int] = None
     legal_moves_opponent_idx: list[int] = None
     unknown_pokemon: int = 0
     unknown_moves: int = 0
     reward: float = 0.0
+    embeddings_self: dict[int, np.array] = None
+    embeddings_opponent: dict[int, np.array] = None
 
     def __post_init__(self):
-        temp1 = embed_all_moves(self.legal_moves_idx, 0, 0)
-        temp2 = embed_all_moves(self.legal_moves_opponent_idx, self.unknown_pokemon, self.unknown_moves)
-        self.recurrent_input = torch.concat([self.obs, temp1, temp2])
-        bad = [embed_idx(idx1, idx2, self.unknown_pokemon, self.unknown_moves)
-               for idx1 in self.legal_moves_idx for idx2 in self.legal_moves_opponent_idx]
+        self_embed_list = [torch.from_numpy(embedding).float() for embedding in self.embeddings_self.values()]
+        opponent_embed_list = [torch.from_numpy(embedding).float() for embedding in self.embeddings_opponent.values()]
+        self.recurrent_input = torch.from_numpy(self.obs).float().view(1, -1)
+        bad = [torch.cat([embed1, embed2]) for embed1 in self_embed_list for embed2 in opponent_embed_list]
         self.advantage_input = bad
 
     def update(self, obs, last_legal_idx, last_legal_opponent_idx, unknown_pokemon, unknown_moves, hidden):
@@ -93,7 +101,7 @@ class Network(nn.Module):
         self.max_forward_steps = config.forward_steps
 
         self.compress = nn.Sequential(
-            nn.Linear(obs_dim + 2 * action_dim, 512),
+            nn.Linear(obs_dim, 512),
             nn.ReLU(),
             nn.Linear(512, self.hidden_dim)
         )
@@ -118,7 +126,7 @@ class Network(nn.Module):
 
     def forward(self, state: AgentState):
 
-        recurrent_input = self.compress(state.recurrent_input.view(1, -1).float())
+        recurrent_input = self.compress(state.recurrent_input)
 
         _, recurrent_output = self.recurrent(recurrent_input, state.hidden_state)
 

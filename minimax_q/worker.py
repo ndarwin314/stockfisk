@@ -38,7 +38,7 @@ def inverse_value_rescale(value, eps=1e-3):
 
 @dataclass
 class Block:
-    obs: torch.tensor
+    obs: np.array
     action: np.array
     opponent_action: np.array
     legal_actions: list[list[int]]
@@ -48,6 +48,8 @@ class Block:
     reward: np.array
     hidden: list[tuple[torch.tensor, torch.tensor]]
     size: int
+    embeddings_self: list[dict[int, np.ndarray]]
+    embeddings_opponent: list[dict[int, np.ndarray]]
 
 
 class ReplayBuffer:
@@ -437,9 +439,6 @@ class Learner:
 
 
 ############################## Actor ##############################
-
-# TODO: for morning NOah, update this to have two moves
-# and figure out how to use both sides for training data
 @dataclass
 class Transition:
     observation: torch.tensor
@@ -452,6 +451,9 @@ class Transition:
     reward: int
     q_estimate: float
     hidden: tuple[torch.tensor, torch.tensor]
+    embeddings_self: dict[int, np.ndarray]
+    embeddings_opponent: dict[int, np.ndarray]
+
 
 
 class LocalBuffer:
@@ -527,6 +529,8 @@ class LocalBuffer:
                 np.array(rewards),
                 [t.hidden for t in self.transitions[i]],
                 self.size,
+                [t.embeddings_self for t in self.transitions[i]],
+                [t.embeddings_opponent for t in self.transitions[i]]
             )
             blocks.append(block)
         return blocks, priorities
