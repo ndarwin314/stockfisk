@@ -8,11 +8,13 @@ import os
 
 import nashpy
 import aioprocessing as aio
+import multiprocessing as mp
 import torch
 import numpy as np
 import scipy as sp
 from torch import nn
-from minimax_q.worker import Learner, Actor, ReplayBuffer, Transition, LocalBuffer, PriorityTree, Block, value_rescale, inverse_value_rescale
+from minimax_q.worker import Learner, Actor
+from minimax_q.utils import PriorityTree, Block, value_rescale, inverse_value_rescale, ReplayBuffer, Transition, LocalBuffer
 from minimax_q.minimaxq import Minimax, move_size, mon_embed_size
 from minimax_q.r2d2 import Network, AgentState, uk_mon_idx, uk_move_idx,move_lookup, dex_lookup, noop_idx, combined_lookup
 import minimax_q.config as config
@@ -33,33 +35,32 @@ def wrap_run(actor):
     asyncio.run(actor.run())
 
 
-def train(num_actors=config.num_actors, log_interval=config.log_interval):
-    env = Minimax(None, 200)
+async def train(num_actors=config.num_actors, log_interval=config.log_interval):
+    sample_queue = asyncio.Queue()
+    # idk what the caps on these are for
+    batch_queue = asyncio.Queue(8)
+    priority_queue = asyncio.Queue(8)
+    buffer = ReplayBuffer([sample_queue], batch_queue, priority_queue)
+    env = (Minimax(None, sample_queue, 10), Minimax(None, sample_queue, 10))
 
-    model = Network(env.action_space.shape[0], env.observation_space.shape[0], config.hidden_dim)
-    del env
+    model = Network(env[0].action_space.shape[0], env[0].observation_space.shape[0], config.hidden_dim)
     model.share_memory()
-    sample_queue_list = [aio.AioQueue() for _ in range(num_actors)]
-    batch_queue = aio.AioQueue(8)
-    priority_queue = aio.AioQueue(8)
+    env[0].set_model(model)
+    env[1].set_model(model)
 
-    buffer = ReplayBuffer(sample_queue_list, batch_queue, priority_queue)
     learner = Learner(batch_queue, priority_queue, model)
-    actors = [Actor(model, get_epsilon(i), sample_queue_list[i]) for i in range(num_actors)]
 
-    actor_procs = [aio.AioProcess(target=wrap_run, args=(actor,)) for actor in actors]
-    for proc in actor_procs:
-        proc.start()
+    # should be able to control how long this goes by modifying n_battles
+    task = asyncio.create_task(env[0].battle_against(env[1], 10))
 
-    buffer_proc = aio.AioProcess(target=buffer.run)
+    buffer_proc = mp.Process(target=buffer.run)
     buffer_proc.start()
 
     learner.run()
 
     buffer_proc.join()
+    await task
 
-    for proc in actor_procs:
-        proc.terminate()
 
 
 class ReplayBufferSync:
@@ -69,16 +70,16 @@ class ReplayBufferSync:
         self.priority_tree = PriorityTree(capacity, config.prio_exponent, config.importance_sampling_exponent)
         self.size = 0
         self.ptr = 0
-        
+
     def __len__(self):
         return self.size
-    
+
     def add(self, block, priority):
         self.priority_tree.update(self.ptr, priority)
         self.buffer[self.ptr] = block
         self.ptr = (self.ptr + 1) % self.capacity
         self.size += 1
-        
+
     def update_priorities(self, idxes, td_errors, old_ptr):
         if self.ptr > old_ptr:
             # range from [old_ptr, self.seq_ptr)
@@ -98,7 +99,7 @@ class ReplayBufferSync:
         for idx in idxes:
             blocks.append(self.buffer[idx])
         return idxes, blocks, torch.from_numpy(is_weights), self.ptr
-        
+
 
 async def train_single_actor():
     env = Minimax(None)

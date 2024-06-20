@@ -1,3 +1,4 @@
+import asyncio
 import copy
 
 import numpy
@@ -7,15 +8,15 @@ import torch
 from gymnasium.spaces import Space, Box, MultiDiscrete
 from gymnasium import Env
 import nashpy
-from time import sleep
-from typing import Union
+from typing import Union, List
 
-from poke_env.player import Gen8EnvSinglePlayer, Player, BattleOrder, ForfeitBattleOrder
+from poke_env.player import Player, BattleOrder, ForfeitBattleOrder
 from poke_env.environment import AbstractBattle, Battle, Move, SideCondition, Weather, Field, Status, Pokemon, PokemonType, EmptyMove
 
-from minimax_q.r2d2 import Network, AgentState, Option
+from minimax_q.r2d2 import Network, AgentState, Option, noop_idx
 from minimax_q.r2d2 import reverse_move_lookup, reverse_dex_lookup, move_lookup, dex_lookup, chart, action_embed_size
 from minimax_q.r2d2 import uk_move_idx, uk_mon_idx
+from minimax_q.utils import LocalBuffer, Transition
 
 #action_space[uk_move_idx] = 5
 #action_space[uk_mon_idx] = 6
@@ -198,20 +199,92 @@ class Minimax(Player, Env):
     observation_space = Box(low, high)
     observation_size = 4183
 
-    def __init__(self, model, max_len=200, epsilon=0.2, account_configuration=None, *args, **kwargs):
-        super().__init__(battle_format="gen8randombattle", account_configuration=account_configuration, *args, **kwargs)
+
+    # add some shared model bullshit
+    def __init__(self, model, queue, max_concurrent, max_len=200, epsilon=0.2, account_configuration=None, *args, **kwargs):
+        super().__init__(battle_format="gen8randombattle",
+                         account_configuration=account_configuration,
+                         max_concurrent_battles=max_concurrent,
+                         *args, **kwargs)
         assert 0 < max_len <= 1000
+        # generic stuff
         self.max_len = max_len
         self.epsilon = epsilon
-        self.turn = 0
         self.policy: Network = model
-        self.history = [[] for _ in range(max_len)]
-        self.actions = [[] for _ in range(max_len)]
-        self.opponent_actions = [[] for _ in range(max_len)]
-        self.qs = [[] for _ in range(max_len)]
-        self.hidden = None
         self.rng = np.random.default_rng()
+        self.queue: asyncio.Queue = queue
+        self.opponent: Minimax = None
+
+        # battle specific
+        self.history: dict[AbstractBattle, list] = {}
+        self.actions: dict[AbstractBattle, list] = {}
+        self.opponent_actions: dict[AbstractBattle, list] = {}
+        self.qs: dict[AbstractBattle, list] = {}
+        self.hidden: dict[AbstractBattle, torch.tensor] = {}
         self._reward_buffer: dict[AbstractBattle, float] = {}
+
+    def set_opponent(self, opp: "Minimax"):
+        self.opponent = opp
+
+    async def _create_battle(self, split_message: List[str]) -> AbstractBattle:
+        battle = await super()._create_battle(split_message)
+        self._reward_buffer[battle] = 0
+        self.history[battle] = [[] for _ in range(self.max_len)]
+        self.actions[battle] = [[] for _ in range(self.max_len)]
+        self.opponent_actions[battle] = [[] for _ in range(self.max_len)]
+        self.qs[battle] = [[] for _ in range(self.max_len)]
+        self.hidden[battle] = None
+        return battle
+
+    async def _battle_finished_callback(self, battle: AbstractBattle):
+        buff = LocalBuffer()
+        num_turns = battle.turn
+        agents = (self, self.opponent)
+        # this is pretty hacky but i think it fine for now
+        for i in range(num_turns):
+            actions = (agents[0].actions[battle][i], agents[1].actions[battle][i])
+            states = (agents[0].history[battle][i], agents[1].history[battle][i])
+            qs = (agents[0].qs[battle][i], agents[1].qs[battle][i])
+            max_len = max(len(actions[0]), len(actions[1]))
+            for j in range(2):
+                while len(actions[j]) < max_len:
+                    actions[j].append(noop_idx)
+                    c = copy.deepcopy(states[j][-1])
+                    c.reward = 0
+                    c.embeddings_self = {noop_idx: np.zeros(mon_embed_size + move_size)}
+                    c.legal_moves_idx = [noop_idx]
+                    states[j].append(c)
+                    qs[j].append(qs[j][-1])
+            for k in range(max_len):
+                transitions = []
+                for j in range(2):
+                    t = Transition(
+                        sp.sparse.coo_array(states[j][k].obs),
+                        actions[j][k],
+                        actions[1 - j][k],
+                        states[j][k].legal_moves_idx,
+                        states[j][k].legal_moves_opponent_idx,
+                        states[j][k].unknown_pokemon,
+                        states[j][k].unknown_moves,
+                        states[j][k].reward,
+                        qs[j][k],
+                        states[j][k].hidden_state,
+                        states[j][k].embeddings_self,
+                        states[j][k].embeddings_opponent,
+                    )
+                    transitions.append(t)
+                buff.add(transitions[0], transitions[1])
+        temp = agents[0].calc_reward(list(agents[0].battles.values())[-1])
+        blocks, priorities = buff.finish((temp, -temp))
+        await self.queue.put((blocks[0], priorities[0]))
+        del self._reward_buffer[battle]
+        del self.history[battle]
+        del self.actions[battle]
+        del self.opponent_actions[battle]
+        del self.qs[battle]
+        del self.hidden[battle]
+        print("test")
+        # add something here to update model periodically
 
     def set_policy(self, policy: Network):
         self.policy = policy
@@ -236,8 +309,8 @@ class Minimax(Player, Env):
 
     # TODO: add dynamax shit
     def choose_move(self, battle: Battle):
-        self.turn = battle.turn
-        if self.turn >= self.max_len:
+        turn = battle.turn
+        if battle.turn >= self.max_len:
             return ForfeitBattleOrder()
         # steps:
         # 1. decode battle to encoding
@@ -248,7 +321,7 @@ class Minimax(Player, Env):
         state_embedding = self.embed_battle(battle)
         agent_state = AgentState(
             state_embedding,
-            self.hidden,
+            self.hidden[battle],
             self_idxs,
             opponent_idxs,
             options2.unrevealed_pokemon,
@@ -260,8 +333,7 @@ class Minimax(Player, Env):
         # 2. pass into model
         with torch.no_grad():
             q_matrix, hidden = self.policy(agent_state)
-        self.hidden = hidden
-        self.hidden = hidden
+        self.hidden[battle] = hidden
         if q_matrix.shape[0] == 0:
             return self.choose_random_move(battle)
         game = nashpy.Game(q_matrix)
@@ -270,19 +342,19 @@ class Minimax(Player, Env):
             pa, pb = next(test)
             q = game[pa, pb][0]
             print(q)
-            self.qs[self.turn - 1].append(q)
+            self.qs[battle][turn - 1].append(q)
             if rng.uniform() > self.epsilon:
                 move = self.rng.choice(agent_state.legal_moves_idx, p=pa)
             else:
                 move = self.choose_random_move(battle)
         except StopIteration:
-            self.qs[self.turn - 1].append(0)
+            self.qs[battle][turn - 1].append(0)
             move = self.choose_random_move(battle)
         if isinstance(move, int_types):
-            self.actions[self.turn-1].append(move)
-            self.history[self.turn-1].append(agent_state)
+            self.actions[battle][turn-1].append(move)
+            self.history[battle][turn-1].append(agent_state)
             # 3. decode output
-            #print(self.username, ": ", self.turn, ": ", self.decode_move(battle, move))
+            #print(self.username, ": ", turn, ": ", self.decode_move(battle, move))
             return self.decode_move(battle, move)
         elif isinstance(move, BattleOrder):
             order = move.order
@@ -290,8 +362,10 @@ class Minimax(Player, Env):
                 move1 = reverse_move_lookup[order.id]
             elif isinstance(order, Pokemon):
                 move1 = reverse_dex_lookup[order.species]
-            self.actions[self.turn-1].append(move1)
-            self.history[self.turn-1].append(agent_state)
+            else:
+                raise RuntimeError
+            self.actions[battle][turn-1].append(move1)
+            self.history[battle][turn-1].append(agent_state)
             return move
 
     # TODO: tune this
@@ -371,7 +445,6 @@ class Minimax(Player, Env):
         self.actions = [[] for _ in range(self.max_len)]
         self.opponent_actions = [[] for _ in range(self.max_len)]
         self.qs = [[] for _ in range(self.max_len)]
-        self.turn = 0
         self._battles = {}
 
     def set_model(self, model: Network):
